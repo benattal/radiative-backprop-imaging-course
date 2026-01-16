@@ -198,28 +198,39 @@ def render_transient(scene, integrator, film_config, spp=64):
     return np.stack(transient_data, axis=-1)
 ```
 
-### 4. Understanding the TransientHDRFilm
+### 4. Test Scene: Transient Cornell Box
 
-The `TransientHDRFilm` from mitransient stores measurements in time bins. Study its interface:
+Use the provided Cornell Box scene for testing. The scene is adapted from [mitransient](https://github.com/benattal/mitransient/blob/main/mitransient/utils.py):
 
 ```python
-# Create a scene with a transient film
-scene_dict = {
-    'type': 'scene',
-    'integrator': {'type': 'path'},
-    'sensor': {
-        'type': 'perspective',
-        'film': {
-            'type': 'transient_hdr_film',
-            'width': 256,
-            'height': 256,
-            'temporal_bins': 512,       # Number of time bins
-            'bin_width_opl': 0.01,      # Width per bin in meters
-            'start_opl': 2.0,           # Starting optical path length
-        },
-        # ... rest of sensor config
-    },
-    # ... rest of scene
+from scenes import cornell_box, cornell_box_steady_state
+
+# Load the transient Cornell Box scene
+scene_dict = cornell_box()
+scene = mi.load_dict(scene_dict)
+
+# Or use the steady-state version to test your path tracer first
+scene_dict_steady = cornell_box_steady_state()
+scene_steady = mi.load_dict(scene_dict_steady)
+```
+
+The transient scene is configured with:
+- **Film**: 256×256 pixels, 300 temporal bins
+- **Temporal range**: starts at OPL 3.5m, bin width 0.02m
+- **Integrator**: `transient_path` (from mitransient)
+
+### 5. Understanding the TransientHDRFilm
+
+The `TransientHDRFilm` from mitransient stores measurements in time bins. The Cornell Box scene already includes a properly configured transient film:
+
+```python
+'film': {
+    'type': 'transient_hdr_film',
+    'width': 256,
+    'height': 256,
+    'temporal_bins': 300,       # Number of time bins
+    'bin_width_opl': 0.02,      # Width per bin in meters
+    'start_opl': 3.5,           # Starting optical path length
 }
 ```
 
@@ -227,7 +238,7 @@ The film provides methods to:
 - `prepare()`: Initialize the film for rendering
 - `develop()`: Return `(steady_image, transient_data)` where transient_data has shape `(height, width, temporal_bins, channels)`
 
-### 5. Building a Transient Path Tracer
+### 6. Building a Transient Path Tracer
 
 Create a transient path tracer that outputs time-resolved measurements to the `TransientHDRFilm`.
 
@@ -272,7 +283,7 @@ class TransientPath(mi.SamplingIntegrator):
         return result, mi.Bool(True), []
 ```
 
-### 6. AMCW Rendering
+### 7. AMCW Rendering
 
 Implement amplitude-modulated continuous-wave (AMCW) ToF rendering. In AMCW systems, the light source and sensor are modulated at frequency ω, and the measurement encodes phase information.
 
@@ -291,7 +302,7 @@ phasor_imag = radiance * dr.sin(phase)
 
 **Implementation task:** Create an AMCW integrator that outputs phasor images (real and imaginary channels).
 
-### 7. Visualization
+### 8. Visualization
 
 Visualize your transient renders:
 
@@ -356,7 +367,7 @@ def plot_pixel_transient(transient_data, x, y, start_opl, bin_width_opl):
 
 In this part, you will implement efficient rendering for confocal scanning systems and non-line-of-sight (NLOS) imaging. The key insight is that instead of sampling light sources directly, we can treat the laser-illuminated point on the relay wall as a secondary light source.
 
-### 8. Confocal Scanning Setup
+### 9. Confocal Scanning Setup
 
 In a confocal NLOS system:
 - A **laser** illuminates a point on a visible relay wall
@@ -380,7 +391,7 @@ In a confocal NLOS system:
        Sensor
 ```
 
-### 9. The Illuminated Point as a Light Source
+### 10. The Illuminated Point as a Light Source
 
 Standard path tracing samples the emitter (laser) directly. For NLOS scenes, this is inefficient because:
 1. The laser spot is very small
@@ -452,7 +463,7 @@ class ConfocalTransientIntegrator(mi.SamplingIntegrator):
         return result, mi.Bool(True), []
 ```
 
-### 10. Point Light vs Area Light Approximation
+### 11. Point Light vs Area Light Approximation
 
 The illuminated spot on the relay wall can be modeled as:
 
@@ -469,24 +480,21 @@ direction = d / dist
 contribution = I * bsdf.eval(wo) * dr.dot(n, direction) / (dist * dist)
 ```
 
-**Area light approximation (more accurate):**
+**Area light approximation (more accurate, optional):**
 - Model the laser spot as a small area emitter with Gaussian intensity profile
-- Sample points on the illuminated area using importance sampling
+- Sample rays from the projector and trace them to find illuminated points
 
 For the area light implementation, refer to the `ConfocalProjector` class in mitransient:
 - [mitransient/emitters/confocal_projector.py](https://github.com/benattal/mitransient/blob/main/mitransient/emitters/confocal_projector.py)
 
 Key methods to study:
-- `sample_spot()`: Importance samples positions from a Gaussian mixture using Box-Muller transform
+- `sample_spot()`: Samples *rays from the projector* using a Gaussian distribution (Box-Muller transform)
 - `eval_pattern()`: Evaluates the Gaussian intensity at a given position
 - `sample_emitter()`: Combines spot sampling with emitter direction sampling
 
-The implementation uses:
-1. **CDF-based spot selection** when multiple spots exist
-2. **Box-Muller transform** for Gaussian sampling: `r = σ × √(-2 log(u₁))`, `θ = 2π × u₂`
-3. **Proper PDF computation** combining spot selection probability with Gaussian PDF
+**Note:** The `sample_spot()` method samples in the projector's ray space, not directly on the illuminated surface. Converting this to a valid PDF over illuminated points requires accounting for the Jacobian of the projection. This is a subtle detail that may be beyond the scope of this assignment—the point light approximation is sufficient for the core deliverables.
 
-### 11. Filtering Direct Visibility
+### 12. Filtering Direct Visibility
 
 For NLOS rendering, we often want to exclude directly visible contributions (line-of-sight paths). Only include paths that bounce off hidden geometry:
 
@@ -505,62 +513,41 @@ on_relay = is_on_relay_wall(si, relay_wall_shapes)
 include_contribution = had_non_relay_bounce & on_relay
 ```
 
-### 12. NLOS Scene Setup
+### 13. NLOS Scene Setup
 
-Create an NLOS scene with hidden geometry:
+For NLOS testing, use the example scenes from mitransient. The repository includes several NLOS configurations:
+
+- `wall_box_sphere_nlos.xml` - Relay wall with hidden sphere and cube
+- `wall_box_spheres_nlos.xml` - Relay wall with multiple hidden spheres
+- `ourbox_confocal.xml` - Confocal scanning configuration
+
+You can download these from the [mitransient scenes directory](https://github.com/benattal/mitransient/tree/main/scenes):
 
 ```python
-nlos_scene = {
-    'type': 'scene',
+# Load an NLOS scene from XML
+scene = mi.load_file('path/to/wall_box_sphere_nlos.xml')
 
-    # Relay wall (visible surface)
-    'relay_wall': {
-        'type': 'rectangle',
-        'to_world': mi.ScalarTransform4f.translate([0, 0, 0]),
-        'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0.8, 0.8, 0.8]}}
-    },
-
-    # Hidden geometry (behind an occluder or around a corner)
-    'hidden_object': {
-        'type': 'sphere',
-        'center': [0, 0, -2],  # Behind the relay wall
-        'radius': 0.5,
-        'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0.9, 0.1, 0.1]}}
-    },
-
-    # Occluder (blocks direct view of hidden object)
-    'occluder': {
-        'type': 'rectangle',
-        'to_world': mi.ScalarTransform4f.translate([0, 0, -0.5]).rotate([1, 0, 0], 90),
-        'bsdf': {'type': 'diffuse'}
-    },
-
-    # Transient sensor looking at the relay wall
-    'sensor': {
-        'type': 'perspective',
-        'to_world': mi.ScalarTransform4f.look_at([0, 0, 3], [0, 0, 0], [0, 1, 0]),
-        'film': {
-            'type': 'transient_hdr_film',
-            'width': 128,
-            'height': 128,
-            'temporal_bins': 256,
-            'bin_width_opl': 0.02,
-            'start_opl': 4.0,
-        }
-    }
-}
+# Or define a simple NLOS scene programmatically
+# See mitransient/scenes/ for complete examples
 ```
+
+The NLOS scenes typically include:
+- **Relay wall**: A diffuse surface that the sensor observes
+- **Hidden geometry**: Objects behind/around the relay wall (not directly visible)
+- **Confocal projector**: Laser that illuminates points on the relay wall
+- **Transient film**: Configured to capture the time-resolved response
 
 ### Part 2 Deliverables
 
-1. **Confocal integrator** that treats the laser-illuminated point as a light source
-2. **Point light vs area light comparison:** Implement both approximations and compare results
-3. **NLOS scene renders:**
+1. **Confocal integrator** that treats the laser-illuminated point as a point light source
+2. **NLOS scene renders:**
    - Transient measurement of hidden geometry
    - Comparison with/without direct visibility filtering
-4. **Analysis:**
-   - How does spot size affect the rendering?
+3. **Analysis:**
    - What time bins correspond to different path types (relay-only vs hidden-scene bounce)?
+   - How does the transient response reveal information about the hidden geometry?
+
+**Optional:** Implement the area light approximation (see `ConfocalProjector` in mitransient) and compare with the point light approach.
 
 ---
 
