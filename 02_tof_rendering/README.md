@@ -400,6 +400,8 @@ Standard path tracing samples the emitter (laser) directly. For NLOS scenes, thi
 
 **Better approach:** Treat the illuminated point on the relay wall as a secondary light source.
 
+**Key insight for confocal scanning:** In a confocal setup, the laser direction is aligned with the camera ray direction. This means the laser illuminates the same point on the relay wall that the camera pixel is observing. For each camera ray, trace it to find the relay wall intersection—this is also where the laser hits.
+
 **Implementation strategy:**
 
 ```python
@@ -407,9 +409,10 @@ class ConfocalTransientIntegrator(mi.SamplingIntegrator):
     """
     Transient integrator for confocal NLOS rendering.
 
-    Instead of sampling the laser directly, we:
-    1. Determine where the laser illuminates the relay wall
-    2. Treat that illuminated point as an emitter for NEE
+    In confocal mode, the laser is co-located with the camera and points
+    in the same direction as each camera ray. This means:
+    1. The first intersection of the camera ray IS the laser hit point
+    2. We treat this illuminated point as an emitter for subsequent bounces
     """
 
     def __init__(self, props=mi.Properties()):
@@ -417,47 +420,42 @@ class ConfocalTransientIntegrator(mi.SamplingIntegrator):
         self.max_depth = props.get('max_depth', 8)
         self.pulse = GaussianPulse(width_opl=props.get('pulse_width_opl', 0.03))
 
-        # Laser parameters
-        self.laser_origin = props.get('laser_origin', mi.Point3f(0, 0, 2))
-        self.laser_direction = props.get('laser_direction', mi.Vector3f(0, 0, -1))
-
-    def get_laser_hit_point(self, scene) -> mi.SurfaceInteraction3f:
-        """Trace the laser ray to find where it hits the relay wall."""
-        laser_ray = mi.Ray3f(self.laser_origin, self.laser_direction)
-        return scene.ray_intersect(laser_ray)
-
     @dr.syntax
     def sample(self, scene, sampler, ray, medium=None, active=True):
-        # Get the laser illumination point (once per pixel, or cached)
-        si_laser = self.get_laser_hit_point(scene)
-        laser_hit_p = si_laser.p
-        laser_hit_n = si_laser.n
+        # First intersection: this is the confocal point (laser hits here too)
+        si_confocal = scene.ray_intersect(ray, active)
+        confocal_p = si_confocal.p
+        confocal_n = si_confocal.n
 
-        # Initialize path tracing
-        throughput = mi.Color3f(1.0)
-        path_length = mi.Float(0.0)
+        # Path length starts with distance to confocal point
+        # (light travels: laser -> confocal point -> hidden scene -> confocal point -> sensor)
+        path_length = mi.Float(si_confocal.t)
+
+        # Now trace secondary rays from the confocal point into the scene
+        # Sample a direction from the confocal point's hemisphere
+        wo_local = mi.warp.square_to_cosine_hemisphere(sampler.next_2d())
+        wo_world = si_confocal.to_world(wo_local)
+        secondary_ray = si_confocal.spawn_ray(wo_world)
+
+        # Continue path tracing from the secondary ray
         # ...
 
         while dr.hint(active, max_iterations=self.max_depth, label="NLOS"):
-            si = scene.ray_intersect(ray, active)
+            si = scene.ray_intersect(secondary_ray, active)
             active &= si.is_valid()
             path_length[active] += si.t
 
-            # NEE: Sample the illuminated point instead of the laser
-            # Direction from current point to laser hit
-            d_to_laser = laser_hit_p - si.p
-            dist_to_laser = dr.norm(d_to_laser)
-            wo_to_laser = d_to_laser / dist_to_laser
+            # NEE: Sample the confocal point as a light source
+            d_to_confocal = confocal_p - si.p
+            dist_to_confocal = dr.norm(d_to_confocal)
+            wo_to_confocal = d_to_confocal / dist_to_confocal
 
-            # Check visibility to the laser hit point
-            shadow_ray = si.spawn_ray_to(laser_hit_p)
+            # Check visibility back to the confocal point
+            shadow_ray = si.spawn_ray_to(confocal_p)
             visible = ~scene.ray_test(shadow_ray, active)
 
-            # Evaluate BSDF at current point
-            # ...
-
-            # The "emitter" contribution from the illuminated point
-            # This depends on the laser intensity and relay wall BSDF
+            # The contribution includes the return path to confocal point
+            # total_path = path_length + dist_to_confocal + dist_to_confocal (return to sensor)
             # ...
 
         return result, mi.Bool(True), []
