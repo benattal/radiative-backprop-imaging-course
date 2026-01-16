@@ -546,13 +546,3 @@ The NLOS scenes typically include:
    - How does the transient response reveal information about the hidden geometry?
 
 **Optional:** Implement the area light approximation (see `ConfocalProjector` in mitransient) and compare with the point light approach.
-
----
-
-## Extensions (Optional)
-
-- **FSCW Rendering:** Implement frequency-swept continuous-wave rendering and compare with the Fourier transform of your transient histogram
-- **Depth from AMCW:** Use phase measurements to compute a depth map
-- **Time-gated rendering:** Efficiently render only contributions within a specific time window
-- **Hidden geometry sampling:** Importance sample directions toward hidden geometry for faster convergence
-- **Confocal scanning pattern:** Render a full confocal scan by varying the laser position
