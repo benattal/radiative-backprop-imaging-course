@@ -176,10 +176,80 @@ class TimeGatedTransientPath(mi.SamplingIntegrator):
         return result, mi.Bool(True), []
 ```
 
-**Render loop:** To render a full transient image, call `sample()` for many different `target_time` values spanning your temporal range:
+**Render at time function:** This function generates camera rays in a fully vectorized manner and invokes the integrator's `sample` method for a specific target time:
 
 ```python
-def render_transient(scene, integrator, film_config, spp=64):
+def render_at_time(scene, integrator, sensor, target_time, spp=64):
+    """
+    Render a single time slice by generating rays and calling the integrator's sample method.
+
+    Args:
+        scene: Mitsuba scene
+        integrator: TimeGatedTransientPath integrator instance
+        sensor: Camera sensor
+        target_time: Target optical path length (in meters)
+        spp: Samples per pixel
+
+    Returns:
+        Rendered image as numpy array with shape (height, width, 3)
+    """
+    # Get image resolution from sensor
+    film = sensor.film()
+    res = film.size()
+    width, height = res[0], res[1]
+    num_pixels = width * height
+
+    # Total number of rays = pixels * spp (fully vectorized)
+    total_rays = num_pixels * spp
+
+    # Create and seed sampler for all rays at once
+    sampler = mi.load_dict({'type': 'independent', 'sample_count': spp})
+    sampler.seed(0, total_rays)
+
+    # VECTORIZED: Create all ray indices at once (including spp dimension)
+    idx = dr.arange(mi.UInt32, total_rays)
+    pixel_idx = idx // spp  # Which pixel this ray belongs to
+    x = pixel_idx % width
+    y = pixel_idx // width
+
+    # Convert to normalized coordinates with jitter for anti-aliasing
+    jitter = sampler.next_2d()
+    pos_x = (mi.Float(x) + jitter.x) / float(width)
+    pos_y = (mi.Float(y) + jitter.y) / float(height)
+    pos_sample = mi.Point2f(pos_x, pos_y)
+
+    # Samples for ray generation
+    time_sample = mi.Float(0.0)
+    wavelength_sample = mi.Float(0.5)
+    aperture_sample = mi.Point2f(0.5, 0.5)
+
+    # VECTORIZED: Sample all rays at once
+    rays, ray_weight = sensor.sample_ray(
+        time_sample, wavelength_sample, pos_sample, aperture_sample
+    )
+
+    # Call the integrator's sample method with target_time
+    # Returns (color, valid, aovs)
+    color, valid, _ = integrator.sample(
+        scene, sampler, rays, target_time, medium=None, active=True
+    )
+
+    # Weight the result
+    weighted_color = dr.select(valid, color * ray_weight, mi.Color3f(0.0))
+
+    # Reshape to (num_pixels, spp) and average over spp dimension
+    r = np.array(weighted_color.x).reshape(num_pixels, spp).mean(axis=1).reshape(height, width)
+    g = np.array(weighted_color.y).reshape(num_pixels, spp).mean(axis=1).reshape(height, width)
+    b = np.array(weighted_color.z).reshape(num_pixels, spp).mean(axis=1).reshape(height, width)
+    image = np.stack([r, g, b], axis=-1).astype(np.float32)
+
+    return image
+```
+
+**Render loop:** To render a full transient image, call `render_at_time()` for many different `target_time` values spanning your temporal range:
+
+```python
+def render_transient(scene, integrator, sensor, film_config, spp=64):
     """Render transient by sampling different target times."""
     num_bins = film_config['temporal_bins']
     start_opl = film_config['start_opl']
@@ -188,13 +258,15 @@ def render_transient(scene, integrator, film_config, spp=64):
     transient_data = []
 
     for bin_idx in range(num_bins):
-        # Target time for this bin (can add jitter for anti-aliasing)
+        print(f"Rendering bin {bin_idx + 1}/{num_bins}...", end='\r')
+        # Target time for this bin (center of bin)
         target_time = start_opl + (bin_idx + 0.5) * bin_width
 
         # Render at this target time
-        image = render_at_time(scene, integrator, target_time, spp)
+        image = render_at_time(scene, integrator, sensor, target_time, spp)
         transient_data.append(image)
 
+    print()  # New line after progress
     return np.stack(transient_data, axis=-1)
 ```
 
@@ -212,6 +284,58 @@ scene = mi.load_dict(scene_dict)
 # Or use the steady-state version to test your path tracer first
 scene_dict_steady = cornell_box_steady_state()
 scene_steady = mi.load_dict(scene_dict_steady)
+```
+
+**Rendering both steady state and transient scenes:**
+
+```python
+import matplotlib.pyplot as plt
+
+# Configuration
+spp = 64
+film_config = {
+    'temporal_bins': 300,
+    'start_opl': 3.5,
+    'bin_width_opl': 0.02,
+}
+
+# --- Steady State Rendering ---
+# Use mi.render for standard steady-state rendering
+steady_image = mi.render(scene_steady, spp=spp)
+steady_image_np = np.array(steady_image)
+
+# Display steady state result
+plt.figure(figsize=(6, 6))
+plt.imshow(np.clip(steady_image_np ** (1/2.2), 0, 1))  # Gamma correction
+plt.title('Steady State Render')
+plt.axis('off')
+plt.show()
+
+# --- Transient Rendering ---
+# Create the time-gated transient integrator
+integrator = TimeGatedTransientPath(mi.Properties())
+
+# Get the sensor from the scene
+sensor = scene.sensors()[0]
+
+# Render the full transient using render_transient
+transient_data = render_transient(scene, integrator, sensor, film_config, spp=spp)
+
+print(f"Transient data shape: {transient_data.shape}")  # (height, width, 3, temporal_bins)
+
+# Verify: sum over time should approximate steady state
+transient_sum = np.sum(transient_data, axis=-1) * film_config['bin_width_opl']
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.imshow(np.clip(steady_image_np ** (1/2.2), 0, 1))
+plt.title('Steady State')
+plt.axis('off')
+plt.subplot(1, 2, 2)
+plt.imshow(np.clip(transient_sum ** (1/2.2), 0, 1))
+plt.title('Transient Sum (should match steady state)')
+plt.axis('off')
+plt.tight_layout()
+plt.show()
 ```
 
 The transient scene is configured with:
